@@ -1,0 +1,369 @@
+import os
+import sys
+import re
+
+# Removed local load_dotenv, handled in config.py
+
+import threading
+import asyncio
+import time
+import socket
+from datetime import datetime
+from sarvamai import SarvamAI
+
+# Root path injection for sub-module imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import config
+
+sarvam_key = os.environ.get("SARVAM_API_KEY", "")
+try:
+    sarvam_client = SarvamAI(api_subscription_key=sarvam_key)
+except Exception as e:
+    print(f"[SARVAM] Init error: {e}")
+    sarvam_client = None
+
+from config import GROQ_API_KEY, get_path
+from dependencies import edge_tts, sr
+from tts_utils import _init_fallback_tts
+from memory.memory_manager import MemoryManager
+from core.orchestrator import Orchestrator
+from input.listener import wait_for_wake_word, listen
+
+class JarvisAgent:
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        self._state = value
+        self.send_gui_state(value)
+
+    def __init__(self):
+        print("🚀 Initializing Jarvis Agent V2.5 Architecture...")
+        
+        # 1. Core Attributes
+        self._state = "idle"
+        self.voice_mode = True
+        self.notes = []
+        self.reminders = []
+        self.chat_history = []
+        self.awake_until = 0
+        self._unknown_streak = 0
+        
+        # 2. Networking for UI & Immediate Launch
+        self.gui_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.launch_ui()
+        
+        # 3. Hardware/System Init
+        self.memory = MemoryManager()
+        self.fallback_engine = _init_fallback_tts()
+        self._speak_lock = threading.Lock()
+        
+        # 4. Core Modules
+        self.orchestrator = Orchestrator(self)
+        
+        # 5. Listener Init
+        self.init_listener()
+        
+        # 6. Wake Word Pre-load (to move 103/103 loading bar to startup)
+        self.wake_model = None
+        # self.pre_load_wake_word()  # Commented out for faster testing boot
+
+        # 7. Authentication & Greeting
+        self.authenticate_and_greet()
+
+    def pre_load_wake_word(self):
+        print("[BOOT] Pre-loading wake word engine...")
+        try:
+                
+            from openwakeword.model import Model as WakeModel
+            self.wake_model = WakeModel(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+            print("[BOOT] Wake word engine ready.")
+        except Exception as e:
+            print(f"[BOOT ERROR] Failed to pre-load wake word: {e}")
+            self.wake_model = None
+
+    def authenticate_and_greet(self):
+        self.speak("Systems online. Welcome back, Shivam. (Biometric authentication disabled for testing)")
+        return
+        
+        # --- FACE RECOGNITION COMMENTED OUT FOR TESTING ---
+        """
+        self.speak("Systems online. Initializing biometric authentication.")
+        print("[AUTH] Initializing Face Authentication...")
+        
+        # Launch the face auth GUI
+        import subprocess
+        python_exe = sys.executable
+        venv_python = get_path("..", ".venv", "Scripts", "python.exe")
+        if os.path.exists(venv_python):
+            python_exe = venv_python
+        try:
+            face_ui_path = get_path("ui", "face_auth_gui.py")
+            subprocess.Popen([python_exe, face_ui_path])
+        except Exception as e:
+            print(f"[FACE UI ERROR] {e}")
+
+        # Let the UI load and play initial animation
+        time.sleep(1.0)
+        self.send_face_auth_state("INITIALIZING BIOMETRIC AUTHENTICATION")
+        time.sleep(1.0)
+        self.send_face_auth_state("POWERING UP OPTICS")
+
+        from tools.camera_cortex import capture_frame, verify_face, analyze_emotion
+        
+        # We perform a quick biometric scan
+        time.sleep(0.5)
+        self.send_face_auth_state("CAPTURING FRAME")
+        img_path = capture_frame()
+        if img_path:
+            self.send_face_auth_state("AUTHENTICATING")
+            result = verify_face(img_path)
+            if result.get("verified"):
+                user_name = result.get("name", "Shivam")
+                mood = analyze_emotion(img_path)
+                print(f"[AUTH] Biometric match found: {user_name} | Mood: {mood}")
+                
+                self.send_face_auth_state(f"SUCCESS:{user_name}")
+                # Wait for GUI success animation to finish
+                time.sleep(3)
+                
+                # Personalized greeting via LLM (premium, professional, mood-aware)
+                sys_msg = (
+                    f"You are Jarvis, a highly advanced, premium AI assistant. "
+                    f"Your creator, {user_name}, has just authenticated. "
+                    f"Their facial scan indicates they are feeling '{mood}'. "
+                    "Provide a very brief, sophisticated, and warm welcome back. "
+                    "Acknowledge their mood naturally, but remain sharp and professional. "
+                    "Do NOT use slang, Hinglish, or casual banter. "
+                    "Do NOT mention the weather, time, or use motivational quotes. Maximum 2 sentences."
+                )
+                
+                # Use a cleaner, slightly formal vibe for the startup sequence
+                vibe = {"technical_mode": True} 
+                greeting = self.orchestrator.brain.query(f"Welcome back {user_name}. Mood: {mood}", sys_msg, temperature=0.6)
+                self.speak(greeting, vibe=vibe)
+            else:
+                print("[AUTH] Biometric mismatch.")
+                self.send_face_auth_state("FAILED")
+                time.sleep(2)
+                self.speak("Identity not recognized. System locked. Standing by for manual override.")
+                
+                import getpass
+                attempts = 2
+                success = False
+                print("\n[SECURITY] Biometric mismatch. Keyboard override required.")
+                while attempts > 0:
+                    code = getpass.getpass(f"Enter Passcode ({attempts} attempts remaining): ")
+                    if code == "Khushi@321#":
+                        success = True
+                        break
+                    else:
+                        print("Incorrect passcode.")
+                        attempts -= 1
+                        
+                if success:
+                    print("[SECURITY] Override accepted.")
+                    self.speak("Override accepted. Welcome back.")
+                else:
+                    print("[SECURITY] MAXIMUM ATTEMPTS EXCEEDED. SYSTEM LOCKDOWN.")
+                    self.speak("Authentication failed. Initiating system lockdown.")
+                    sys.exit(1)
+        else:
+            self.send_face_auth_state("FAILED")
+            time.sleep(2)
+            self.speak("Camera offline. Welcome back, Shivam.")
+        """
+
+    def send_face_auth_state(self, state: str):
+        try:
+            self.gui_socket.sendto(f"STATE:{state}".encode('utf-8'), ("127.0.0.1", 65433))
+        except Exception:
+            pass
+
+    def send_gui_state(self, state: str):
+        try:
+            self.gui_socket.sendto(f"STATE:{state}".encode('utf-8'), ("127.0.0.1", 65432))
+        except Exception:
+            pass
+
+    def launch_ui(self):
+        import subprocess
+        try:
+            python_exe = sys.executable
+            # Try to find venv python
+            venv_python = get_path("..", ".venv", "Scripts", "python.exe")
+            if os.path.exists(venv_python):
+                python_exe = venv_python
+                
+            ui_path = get_path("ui", "jarvis_gui.py")
+            print(f"[UI] Launching Holographic GUI: {ui_path}")
+            subprocess.Popen([python_exe, ui_path])
+        except Exception as e:
+            print(f"[UI ERROR] {e}")
+
+    def init_listener(self):
+        if sr:
+            try:
+                self.recognizer = sr.Recognizer()
+                self.recognizer.pause_threshold = 1.2 # Give user more time to pause between words
+                self.recognizer.non_speaking_duration = 0.8
+                self.microphone = sr.Microphone()
+                self.listen_timeout = 5
+                self.listen_phrase_time_limit = 15 # Increase for long commands
+                print("[LISTENER] Microphone ready.")
+            except Exception as e:
+                print(f"[LISTENER ERROR] {e}")
+                self.recognizer = None
+                self.microphone = None
+        else:
+            self.recognizer = None
+            self.microphone = None
+
+    def speak(self, text, vibe=None):
+        print(f"Jarvis: {text}")
+        asyncio.run(self._speak_async(text, vibe))
+
+    def detect_language(self, text: str) -> str:
+        """Returns 'hi' for Hindi/Hinglish, 'en' for English."""
+        import re
+        HINDI_MARKERS = re.compile(
+            r"\b(hai|hain|kya|bhai|yaar|kar|raha|rahi|toh|aur|nahi|nahin|"
+            r"mein|main|tera|mera|karo|bata|chal|theek|arrey|sun|bol|bas)\b",
+            re.IGNORECASE
+        )
+        words = text.split()
+        hindi_hits = len(HINDI_MARKERS.findall(text))
+        ratio = hindi_hits / max(len(words), 1)
+        return "hi" if ratio >= 0.25 else "en"
+
+    def get_sarvam_pace(self, vibe: dict) -> float:
+        if not vibe: return 1.0
+        if vibe.get("hype_mode"):      return 1.3
+        elif vibe.get("banter_mode"):  return 1.2
+        elif vibe.get("emotional_mode"): return 0.85
+        elif vibe.get("technical_mode"): return 1.1
+        else:                          return 1.0
+
+    def get_christopher_params(self, vibe: dict) -> dict:
+        if not vibe: return {"rate": "+8%",  "pitch": "+0Hz"}
+        if vibe.get("hype_mode"):        return {"rate": "+30%", "pitch": "+8Hz"}
+        elif vibe.get("banter_mode"):    return {"rate": "+20%", "pitch": "+4Hz"}
+        elif vibe.get("emotional_mode"): return {"rate": "-8%",  "pitch": "-3Hz"}
+        elif vibe.get("technical_mode"): return {"rate": "+10%", "pitch": "+0Hz"}
+        else:                            return {"rate": "+8%",  "pitch": "+0Hz"}
+
+    def strip_hindi_for_christopher(self, text: str) -> str:
+        replacements = {
+            "yaar": "bro",     "bhai": "bro",      "yrr": "yo",
+            "arrey": "hey",    "acha": "okay",      "nahi": "no",
+            "haan": "yeah",    "chal": "alright",   "mast": "sick",
+            "theek": "fine",   "bata": "tell me",   "dekh": "look",
+            "sun": "listen",   "bol": "say",        "sala": "dude",
+            "oye": "hey",      "sahi": "right",     "ekdum": "totally",
+            "bilkul": "absolutely", "bindaas": "chill"
+        }
+        for hindi, english in replacements.items():
+            text = re.sub(rf'\b{hindi}\b', english, text, flags=re.IGNORECASE)
+        return text
+
+    async def _speak_async(self, text, vibe=None):
+        self.state = "speaking"
+        # Wait for any in-progress speech to finish (max 10s) before acquiring lock
+        deadline = 10.0
+        waited = 0.0
+        while self._speak_lock.locked() and waited < deadline:
+            await asyncio.sleep(0.1)
+            waited += 0.1
+        with self._speak_lock:
+            try:
+                import tempfile, pygame
+                
+                lang = self.detect_language(text)
+                if lang == "hi" and sarvam_client:
+                    pace = self.get_sarvam_pace(vibe)
+                    audio = sarvam_client.text_to_speech.convert(
+                        text=text,
+                        target_language_code="hi-IN",
+                        model="bulbul:v3",
+                        speaker="rohan",
+                        pace=pace,
+                    )
+                    raw = audio.audios[0]
+                    if isinstance(raw, str):
+                        import base64
+                        audio_bytes = base64.b64decode(raw)
+                    else:
+                        audio_bytes = raw
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                        tmp_path = f.name
+                        f.write(audio_bytes)
+                else:
+                    clean_text = self.strip_hindi_for_christopher(text)
+                    params = self.get_christopher_params(vibe)
+                    communicate = edge_tts.Communicate(
+                        text=clean_text,
+                        voice="en-US-ChristopherNeural",
+                        rate=params["rate"],
+                        pitch=params["pitch"]
+                    )
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                        tmp_path = f.name
+                    await communicate.save(tmp_path)
+                
+                pygame.mixer.init()
+                pygame.mixer.music.load(tmp_path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    await asyncio.sleep(0.1)
+                pygame.mixer.music.unload()
+                pygame.mixer.quit()
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception as e:
+                print(f"[TTS ERROR] {e}")
+                communicate = edge_tts.Communicate(
+                    text=text,
+                    voice="en-US-ChristopherNeural",
+                    rate="+8%",
+                    pitch="+0Hz"
+                )
+                import tempfile, pygame
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                    tmp_path = f.name
+                await communicate.save(tmp_path)
+                
+                pygame.mixer.init()
+                pygame.mixer.music.load(tmp_path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    await asyncio.sleep(0.1)
+                pygame.mixer.music.unload()
+                pygame.mixer.quit()
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        self.state = "idle"
+
+    def run(self):
+        print("\n✅ Jarvis Agent V2.5 is ONLINE.")
+        print("Listening for 'Hey Jarvis'...")
+        try:
+            while True:
+                if wait_for_wake_word(self):
+                    command = listen(self)
+                    if command:
+                        if any(w in command for w in ["exit", "quit", "goodbye", "bye"]):
+                            self.speak("Goodbye, sir.")
+                            break
+                        self.orchestrator.handle_user_input(command)
+                        # Keep awake for 5 seconds after responding
+                        self.awake_until = time.time() + 5
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nEmergency Shutdown Initiated.")
+
+if __name__ == "__main__":
+    agent = JarvisAgent()
+    agent.run()
